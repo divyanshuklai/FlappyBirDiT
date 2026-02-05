@@ -100,30 +100,76 @@ def save_frames(chunk_index, file_name, frames, inputs : list[dict[str,bool]], t
         group.create_dataset('inputs',data=input_array)
 
 import gymnasium as gym
+from multiprocessing import Process
+
+def save_chunk_to_h5(file_path, chunk_index, buffer, action_meanings):
+    """Saves a buffer of gameplay data to a chunk in an H5 file."""
+    if not buffer:
+        return
+
+    try:
+        frames, actions, timestamps = zip(*buffer)
+
+        frames = np.array(frames, dtype=np.uint8)
+        timestamps = np.array(timestamps, dtype=np.float64)
+
+        input_keys = [action_meanings.get(1, 'space')]
+        input_dtype = [(key, 'bool') for key in input_keys]
+        input_array = np.zeros(len(actions), dtype=input_dtype)
+        
+        for i, action in enumerate(actions):
+            if action == 1:
+                input_array[i][input_keys[0]] = True
+
+        with h5py.File(file_path, 'a') as f:
+            chunk_name = f'chunk_{chunk_index:04d}'
+            group = f.create_group(chunk_name)
+            group.create_dataset('frames', data=frames, compression="lzf")
+            group.create_dataset('timestamps', data=timestamps)
+            group.create_dataset('inputs', data=input_array)
+    except Exception as e:
+        print(f"Error in save_chunk_to_h5: {e}")
+
 
 class RecorderEnvWrapper(gym.Wrapper):
     """
-    A wrapper for a Gymnasium environment that records gameplay to an H5 file.
+    A wrapper for a Gymnasium environment that records gameplay to an H5 file
+    using a background process to prevent blocking.
     """
-    def __init__(self, env, output_dir, worker_index, run_id):
+    def __init__(self, env, output_dir, worker_index, run, fps=60):
         super().__init__(env)
         self.output_dir = Path(output_dir)
         self.worker_index = worker_index
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        self.file_path = self.output_dir / f"rollout_worker_{self.worker_index}_run_{run_id}.h5"
+        self.file_path = self.output_dir / f"rollout_worker_{self.worker_index}_run_{run}.h5"
         self.chunk_index = 0
         self.buffer = []
         self.chunk_size = 1000
         self.action_meanings = self.env.get_action_meanings()
+        self.save_processes = []
+
+        # FPS control
+        self.target_fps = fps
+        self.env_render_fps = self.env.metadata.get("render_fps", 120)
+        self.record_every_n_steps = max(1, round(self.env_render_fps / self.target_fps))
+        self.step_count = 0
+        self.recording_enabled = False
+
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
         
+        # Always render the frame to keep the environment running at a consistent speed
         frame = self.env.render()
-        timestamp = time.time()
-        
-        self.buffer.append((frame, action, timestamp))
+
+        if self.recording_enabled:
+            # But only record the frame if it's a sampling step
+            if self.step_count % self.record_every_n_steps == 0:
+                timestamp = time.time()
+                self.buffer.append((frame, action, timestamp))
+
+        self.step_count += 1
 
         if len(self.buffer) >= self.chunk_size:
             self._save_chunk()
@@ -131,36 +177,45 @@ class RecorderEnvWrapper(gym.Wrapper):
         return obs, reward, terminated, truncated, info
 
     def reset(self, **kwargs):
-        return self.env.reset(**kwargs)
+        result = self.env.reset(**kwargs)
+        self.step_count = 0
+
+        if self.recording_enabled:
+            # Always record the first frame of an episode
+            frame = self.env.render()
+            timestamp = time.time()
+            # Use action 0 (no-op) for the initial frame, as no action has been taken yet.
+            self.buffer.append((frame, 0, timestamp))
+        
+        return result
 
     def close(self):
         if self.buffer:
             self._save_chunk()
+        
+        print(f"Waiting for {len(self.save_processes)} saving processes to finish...")
+        for p in self.save_processes:
+            p.join()
+        print("All saving processes finished.")
+
         self.env.close()
 
     def _save_chunk(self):
         if not self.buffer:
             return
 
-        frames, actions, timestamps = zip(*self.buffer)
+        p = Process(
+            target=save_chunk_to_h5,
+            args=(self.file_path, self.chunk_index, self.buffer, self.action_meanings)
+        )
+        p.start()
+        self.save_processes.append(p)
+
         self.buffer = []
-
-        frames = np.array(frames, dtype=np.uint8)
-        timestamps = np.array(timestamps, dtype=np.float64)
-
-        input_keys = [self.action_meanings[1]]
-        input_dtype = [(key, 'bool') for key in input_keys]
-        input_array = np.zeros(len(actions), dtype=input_dtype)
-        for i, action in enumerate(actions):
-            if action == 1:
-                input_array[i][input_keys[0]] = True
-
-        with h5py.File(self.file_path, 'a') as f:
-            chunk_name = f'chunk_{self.chunk_index:04d}'
-            group = f.create_group(chunk_name)
-            group.create_dataset('frames', data=frames)
-            group.create_dataset('timestamps', data=timestamps)
-            group.create_dataset('inputs', data=input_array) # Save as 'inputs'
-        
         self.chunk_index += 1
+
+    def enable_recording(self):
+        """Enable recording for this environment."""
+        self.recording_enabled = True
+
 

@@ -15,7 +15,6 @@ class FlappyBirdEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps":120}
     PIPE_WIDTH = 69
     PIPE_HEIGHT = 425
-    PIPE_GAP = 200
 
     def __init__(self, render_mode=None):
 
@@ -118,6 +117,8 @@ class FlappyBirdEnv(gym.Env):
             reward += -1.0
         if pipe_crossed:
             reward += 1.0
+        # if abs(self.bird_movement) > 7:
+        #     reward -= 0.1
 
         observation = self._get_obs()
         info = self._get_info()
@@ -147,16 +148,22 @@ class FlappyBirdEnv(gym.Env):
     def _get_obs(self):
         bird_y = self.bird_rect.centery
         bird_velocity = self.bird_movement
-        next_window_x, next_window_y = 467, 683
+        next_window_x, next_window_y = 600, 600
         for pipe in self.pipes:
             if pipe["top"].right > self.bird_rect.left:
                 next_window_x = pipe['top'].centerx - self.bird_rect.centerx
-                next_window_y = pipe['top'].bottom + (self.PIPE_GAP // 2)
+                next_window_y = (pipe['top'].bottom + pipe['bottom'].top) // 2
                 break
-        return np.array(
-            [bird_y, bird_velocity, next_window_x, next_window_y],
-            dtype=np.float32
-        )
+        if next_window_x < self.height:
+            return np.array(
+                [bird_y / self.height, bird_velocity, next_window_x / self.width, next_window_y /self.height],
+                dtype=np.float32
+            )
+        else:
+            return np.array(
+                [bird_y / self.height, bird_velocity, 600 / self.width, 600 /self.height],
+                dtype=np.float32
+            )
     
     def _get_info(self):
         return {"score" : self.score}
@@ -175,16 +182,17 @@ class FlappyBirdEnv(gym.Env):
             if ( event.type == self.create_pipe and not self.game_over
             and not any(pipe["top"].right > 250 for pipe in self.pipes) ):
                 gap_center_y = np.random.randint(150, 350)
-                start_x = 440 + np.random.randint(20, 60)
+                pipe_gap = np.random.randint(200, 300)
+                start_x = 440 + np.random.randint(0, 60)
                 top_pipe = pygame.Rect(
                     start_x, 
-                    gap_center_y - (self.PIPE_GAP // 2) - self.PIPE_HEIGHT,
+                    gap_center_y - (pipe_gap// 2) - self.PIPE_HEIGHT,
                     self.PIPE_WIDTH,
                     self.PIPE_HEIGHT
                 )
                 bottom_pipe = pygame.Rect(
                     start_x,
-                    gap_center_y + (self.PIPE_GAP // 2),
+                    gap_center_y + (pipe_gap // 2),
                     self.PIPE_WIDTH,
                     self.PIPE_HEIGHT
                 )
